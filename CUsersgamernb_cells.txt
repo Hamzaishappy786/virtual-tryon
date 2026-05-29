@@ -1,0 +1,48 @@
+Total cells: 47
+[0] id=N/A type=markdown | # Stage 5 — IDM-VTON Pre-trained Inference  **What we built so far:** - Stage 1: Pose skeleton (MediaPipe Tasks API) - Stage 2: Body segmentation → cl
+[1] id=N/A type=code | # Sanity check: confirm we have a T4 GPU and enough VRAM import torch  if not torch.cuda.is_available():     raise RuntimeError("No GPU found. Runtime
+[2] id=N/A type=markdown | ## 1. Install Dependencies  We install `huggingface_hub` first to pin a known-good version before anything else imports it (avoids the Colab system ve
+[3] id=N/A type=code | # ── INSTALL CELL — run once, then skip after restart ────────────────────────── # After this cell finishes it kills the Python process so the new pac
+[4] id=N/A type=code | # ── START HERE after the runtime restarts ───────────────────────────────────── # Verify that freshly installed packages are active. # If you see an 
+[5] id=N/A type=markdown | ## 2. Mount Google Drive + Load Stage 1-4 Outputs
+[6] id=N/A type=code | from google.colab import drive drive.mount('/content/drive')
+[7] id=N/A type=code | import os from PIL import Image import numpy as np import matplotlib.pyplot as plt  DRIVE      = "/content/drive/MyDrive/VirtualTryOn" INPUT_DIR  = f"
+[8] id=N/A type=markdown | ## 3. Download VITON-HD Dataset  VITON-HD is the standard benchmark for virtual try-on. It contains 1,024 test pairs with: - `image/` — full person ph
+[9] id=N/A type=code | # Set Kaggle token and download VITON-HD os.environ['KAGGLE_TOKEN'] = 'KGAT_fbc21b5329e8cbe6a20395ed9e25c159' import kagglehub  print("Downloading VIT
+[10] id=N/A type=code | # Explore the dataset structure print("Top-level folders:") for item in sorted(os.listdir(dataset_path)):     item_path = os.path.join(dataset_path, i
+[11] id=N/A type=code | # Load a VITON-HD test pair to use as ground-truth comparison img_dir   = os.path.join(test_base, "image") cloth_dir = os.path.join(test_base, "cloth"
+[12] id=N/A type=code | # Load the first VITON-HD test pair def find_file(directory, stem):     """Find a file by stem (name without extension) in a directory."""     if dire
+[13] id=N/A type=markdown | ## 4. Set Up IDM-VTON  IDM-VTON uses a custom pipeline class (`StableDiffusionXLInpaintPipeline` subclass) and two custom `UNet2DConditionModel` subcl
+[14] id=N/A type=code | %%capture # Clone the IDM-VTON repo for the custom pipeline code !git clone https://github.com/yisol/IDM-VTON /content/IDM-VTON print("Cloned IDM-VTON
+[15] id=N/A type=code | # ── Compatibility patch: PositionNet removed in diffusers 0.25+ ─────────────── # IDM-VTON's unet_hacked_garmnet.py does `from diffusers.models.embed
+[16] id=N/A type=code | # Add IDM-VTON source to Python path so we can import its custom classes import sys idmvton_root = "/content/IDM-VTON" if idmvton_root not in sys.path
+[17] id=N/A type=code | # Download IDM-VTON weights from HuggingFace (~15 GB, takes 10-20 min) # Note: NOT saved to Drive (too large). Re-download each session. from huggingf
+[18] id=N/A type=code | # ── Patch: remove deprecated _remove_lora kwarg ─────────────────────────────── # diffusers 0.26+ removed _remove_lora from Attention.set_processor()
+[19] id=N/A type=code | # ── RESTORE SESSION after kernel restart ────────────────────────────────────── # Weights are cached at /content/idm-vton-weights — no re-download ne
+[20] id=N/A type=code | import gc, torch from accelerate import init_empty_weights from safetensors import safe_open from diffusers import DDIMScheduler, AutoencoderKL from t
+[21] id=N/A type=code | import warnings warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
+[22] id=N/A type=code | # Inject clear_device_cache into accelerate.utils.memory (added in accelerate 0.33+) # peft imports it at module level; our accelerate 0.30 doesn't ha
+[23] id=N/A type=code | import sys import huggingface_hub.errors as _hferr import accelerate.utils.memory as _acc_mem import torch, gc as _gc  # ── patch accelerate ─────────
+[24] id=N/A type=code | import sys, transformers as _t  # EncoderDecoderCache added in transformers 4.43+ (we pinned 4.40) if not hasattr(_t, 'EncoderDecoderCache'):     from
+[25] id=N/A type=code | pipe = TryonPipeline(     vae=vae,     text_encoder=None,     text_encoder_2=None,     tokenizer=None,     tokenizer_2=None,     unet=unet,     unet_e
+[26] id=N/A type=markdown | ## 5. Prepare Inputs  IDM-VTON is trained on VITON-HD at **768 × 1024** (portrait). All person-derived images (person, agnostic, mask, pose) must be: 
+[27] id=N/A type=code | TARGET_W, TARGET_H = 768, 1024  def compute_transform(img: Image.Image, target_w=TARGET_W, target_h=TARGET_H):     """Compute scale + center-crop box 
+[28] id=N/A type=markdown | ## 6. Run IDM-VTON Inference — Our Stage 1-4 Inputs  The inference proceeds in two stages internally: 1. **Garment encoding** — `unet_encoder` process
+[29] id=N/A type=code | # If VRAM is tight, enable sequential CPU offload (much slower but won't OOM) cpu_offload = False  # Set True if you hit CUDA out-of-memory errors if 
+[30] id=N/A type=code | import time  def run_idmvton(     pipe,     agnostic_img: Image.Image,     mask_img: Image.Image,     cloth_img: Image.Image,     pose_img: Image.Imag
+[31] id=N/A type=code | from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer  tokenizer   = CLIPTokenizer.from_pretrained(model_path, subfolder=
+[32] id=N/A type=code | import time  PROMPT     = "a person wearing a blue t-shirt, photorealistic, high quality" NEG_PROMPT = "monochrome, lowres, bad anatomy, worst quality
+[33] id=N/A type=code | print("Running IDM-VTON inference (~5-10 min on T4)...") t0 = time.time()  with torch.no_grad():     output = pipe(         prompt_embeds=prompt_embed
+[34] id=N/A type=code | print("Running IDM-VTON inference (~5-10 min on T4)...") t0 = time.time()  with torch.no_grad():     output = pipe(         prompt_embeds=prompt_embed
+[35] id=N/A type=markdown | # After restoring session, finally getting into work
+[36] id=N/A type=code | import os, sys, gc, torch, torch.nn as nn  model_path = "/content/idm-vton-weights" DRIVE      = "/content/drive/MyDrive/VirtualTryOn" INPUT_DIR  = f"
+[37] id=N/A type=code | pipe = TryonPipeline(     vae=vae, text_encoder=None, text_encoder_2=None,     tokenizer=None, tokenizer_2=None,     unet=unet, unet_encoder=unet_enco
+[38] id=N/A type=code | # Run IDM-VTON on our Stage 1-4 outputs print("Running IDM-VTON on our pipeline outputs (Stages 1-4)...") print("  Input: test_person.jpg + clothing.j
+[39] id=N/A type=code | # Compare Stage 4 (Poisson blend) vs Stage 5 (IDM-VTON diffusion) stage4_result = Image.open(f"{OUTPUT_DIR}/final_tryon.png").convert("RGB")  fig, axe
+[40] id=N/A type=markdown | ## 7. Run IDM-VTON on a VITON-HD Test Pair  Now we run the same pipeline on a VITON-HD test pair where: - The agnostic image, mask, and pose are all *
+[41] id=N/A type=code | # Prepare VITON-HD test pair inputs (already at 768×1024 natively) # If some dataset inputs are missing, fall back to computing them from the person i
+[42] id=N/A type=code | print("Running IDM-VTON on VITON-HD test pair...") result_vton = run_idmvton(     pipe,     agnostic_img=vton_agn_r,     mask_img=vton_mask_r,     clo
+[43] id=N/A type=markdown | ## 8. Save Results + Model Info to Drive
+[44] id=N/A type=code | # Save side-by-side comparison of full pipeline (Stages 1-5) stage4_r = Image.open(f"{OUTPUT_DIR}/final_tryon.png").convert("RGB").resize(     (TARGET
+[45] id=N/A type=code | import json from datetime import datetime  # Save model info / run config to Drive checkpoints folder # (Actual weights are NOT saved to Drive — too l
+[46] id=N/A type=markdown | ## Summary  **What Stage 5 achieved:** - Downloaded VITON-HD dataset (fresh each session, not saved to Drive) - Loaded IDM-VTON pre-trained weights wi
